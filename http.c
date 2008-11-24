@@ -21,6 +21,9 @@
 struct sockaddr_in addr;
 struct timeval http_timeout;
 int nconns = FIXED_CONNS;
+char *host = "localhost";
+char *url = "";
+int silent = 0;
 
 struct ctx {
 	struct event ev;
@@ -37,9 +40,14 @@ http_callback (int fd, short what, void *arg)
 	switch (ctx->state) {
 		case STATE_CONNECT:
 			if (what == EV_WRITE) {
-				fprintf (stderr, "Connection successful\n");
-				if (write (fd, "GET / HTTP/1.0\r\n\r\n", 18) == -1) {
-					fprintf (stderr, "Write error: %m, %d\n", errno);
+				if (!silent) {
+					fprintf (stderr, "Connection successful\n");
+				}
+				r = snprintf (buf, sizeof (buf), "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", url, host);
+				if (write (fd, buf, r) == -1) {
+					if (!silent) {
+						fprintf (stderr, "Write error: %m, %d\n", errno);
+					}
 					return;
 				}
 				ctx->state = STATE_READ;
@@ -48,20 +56,30 @@ http_callback (int fd, short what, void *arg)
 				event_add (&ctx->ev, &http_timeout);
 			}
 			else {
-				fprintf (stderr, "Connection error: %d\n", what);
+				if (!silent) {
+					fprintf (stderr, "Connection error: %d\n", what);
+				}
+				event_del (&ctx->ev);
+				return;
 			}
 			break;
 		case STATE_READ:
 			if (what == EV_READ) {
 				if ((r = read (fd, buf, sizeof (buf))) <= 0) {
-					fprintf (stderr, "Read eof, closing connection\n");
+					if (!silent) {
+						fprintf (stderr, "Read eof, closing connection\n");
+					}
 					event_del (&ctx->ev);
 					return;
 				}
-				fprintf (stderr, "Read %d bytes\n", r);
+				if (!silent) {
+					fprintf (stderr, "Read %d bytes\n", r);
+				}
 			}
 			else {
-				fprintf (stderr, "Read error, connection closed %m, %d\n", errno);
+				if (!silent) {
+					fprintf (stderr, "Read error, connection closed\n");
+				}
 				event_del (&ctx->ev);
 				return;
 			}
@@ -87,7 +105,9 @@ connect_socket ()
 	
 	r = connect(s, (struct sockaddr *)&addr, sizeof (addr));
 	if (r == -1 && errno != EINPROGRESS) {
-		fprintf (stderr, "connect() failed: %m, %d\n", errno);
+		if (!silent) {
+			fprintf (stderr, "connect() failed: %m, %d\n", errno);
+		}
 		return;
 	}
 	curctx = malloc (sizeof (struct ctx));
@@ -111,16 +131,19 @@ main (int argc, char **argv)
 	http_timeout.tv_sec = 1;
 	http_timeout.tv_usec = 0;
 
-	while ((ch = getopt(argc, argv, "c:h:p:n:t:?")) != -1) {
+	while ((ch = getopt(argc, argv, "c:h:p:n:t:u:s?")) != -1) {
         switch (ch) {
             case 'c':
 			case 'h':
-                if (inet_aton (optarg, &addr.sin_addr) == 0) {
-					if ((he = gethostbyname (optarg)) == NULL) {
-						fprintf (stderr, "Host %s not found\n", optarg);
-						return -1;
+				if (optarg) {
+					host = strdup (optarg);
+					if (inet_aton (optarg, &addr.sin_addr) == 0) {
+						if ((he = gethostbyname (optarg)) == NULL) {
+							fprintf (stderr, "Host %s not found\n", optarg);
+							return -1;
+						}
+						memcpy((char *)&addr.sin_addr, he->h_addr, sizeof(struct in_addr));
 					}
-					memcpy((char *)&addr.sin_addr, he->h_addr, sizeof(struct in_addr));
 				}
                 break;
             case 'p':
@@ -138,6 +161,14 @@ main (int argc, char **argv)
 					http_timeout.tv_sec = atoi (optarg);
 				}
 				break;
+			case 'u':
+				if (optarg) {
+					url = strdup (optarg);
+				}
+				break;
+			case 's':
+				silent = 1;
+				break;
             case '?':
             default:
                 /* Show help message and exit */
@@ -147,6 +178,8 @@ main (int argc, char **argv)
                         "-h:        Connect to specified host or ip (default 127.0.0.1)\n"
                         "-p:        Specify port to connect (default 80)\n"
                         "-t:        Number of seconds to timeout (default 1)\n"
+						"-u:        Url to get (relative to /)\n"
+						"-s:        Silent mode\n"
 						"-n:        Number of connections to make (default %d)\n", FIXED_CONNS);
                 exit (EXIT_SUCCESS);
                 break;
