@@ -34,32 +34,47 @@ static void
 http_callback (int fd, short what, void *arg)
 {
 	struct ctx *ctx = (struct ctx *)arg;
-	int r;
+	int r, s_error;
+	socklen_t optlen;
 	char buf[1024];
 
 	switch (ctx->state) {
 		case STATE_CONNECT:
 			if (what == EV_WRITE) {
+				optlen = sizeof (s_error);
+				getsockopt (fd, SOL_SOCKET, SO_ERROR, (void *)&s_error, &optlen);
+	    		if (s_error && !silent) {
+					fprintf (stderr, "Connection failed: %s, %d\n", strerror (s_error), s_error);
+					event_del (&ctx->ev);
+					close (fd);
+					free (ctx);
+					return;
+	    		}
 				if (!silent) {
 					fprintf (stderr, "Connection successful\n");
 				}
 				r = snprintf (buf, sizeof (buf), "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", url, host);
 				if (write (fd, buf, r) == -1) {
 					if (!silent) {
-						fprintf (stderr, "Write error: %m, %d\n", errno);
+						fprintf (stderr, "Write error: %s, %d\n", strerror (errno), errno);
 					}
+					event_del (&ctx->ev);
+					close (fd);
+					free (ctx);
 					return;
 				}
 				ctx->state = STATE_READ;
 				event_del (&ctx->ev);
 				event_set (&ctx->ev, fd, EV_READ | EV_TIMEOUT | EV_PERSIST, http_callback, ctx);
-				event_add (&ctx->ev, &http_timeout);
+				event_add (&ctx->ev, NULL);
 			}
 			else {
 				if (!silent) {
 					fprintf (stderr, "Connection error: %d\n", what);
 				}
 				event_del (&ctx->ev);
+				close (fd);
+				free (ctx);
 				return;
 			}
 			break;
@@ -70,6 +85,8 @@ http_callback (int fd, short what, void *arg)
 						fprintf (stderr, "Read eof, closing connection\n");
 					}
 					event_del (&ctx->ev);
+					close (fd);
+					free (ctx);
 					return;
 				}
 				if (!silent) {
@@ -81,6 +98,8 @@ http_callback (int fd, short what, void *arg)
 					fprintf (stderr, "Read error, connection closed\n");
 				}
 				event_del (&ctx->ev);
+				close (fd);
+				free (ctx);
 				return;
 			}
 			break;
@@ -120,7 +139,7 @@ connect_socket ()
 int
 main (int argc, char **argv)
 {
-	int ch, i;
+	int ch, i, iterations = 1;
 	struct hostent *he;
 	event_init ();
 	
@@ -131,7 +150,7 @@ main (int argc, char **argv)
 	http_timeout.tv_sec = 1;
 	http_timeout.tv_usec = 0;
 
-	while ((ch = getopt(argc, argv, "c:h:p:n:t:u:s?")) != -1) {
+	while ((ch = getopt(argc, argv, "c:h:p:n:t:u:i:s?")) != -1) {
         switch (ch) {
             case 'c':
 			case 'h':
@@ -169,6 +188,11 @@ main (int argc, char **argv)
 			case 's':
 				silent = 1;
 				break;
+			case 'i':
+				if (optarg) {
+					iterations = atoi (optarg);
+				}
+				break;
             case '?':
             default:
                 /* Show help message and exit */
@@ -177,6 +201,7 @@ main (int argc, char **argv)
                         "-?:        This help message\n"
                         "-h:        Connect to specified host or ip (default 127.0.0.1)\n"
                         "-p:        Specify port to connect (default 80)\n"
+						"-i:        Number of iterations (default 1)"
                         "-t:        Number of seconds to timeout (default 1)\n"
 						"-u:        Url to get (relative to /)\n"
 						"-s:        Silent mode\n"
@@ -187,9 +212,12 @@ main (int argc, char **argv)
     }
 	
 	signal (SIGPIPE, SIG_IGN);
-	for (i = 0; i < nconns; i ++) {
-		connect_socket ();
-	}
 
-	event_loop (0);
+	while (iterations --) {
+		for (i = 0; i < nconns; i ++) {
+			connect_socket ();
+		}
+
+		event_loop (0);
+	}
 }
