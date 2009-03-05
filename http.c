@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <time.h>
 
 #include "event.h"
 
@@ -25,7 +26,11 @@ char *host = "localhost";
 char *url = "";
 int silent = 0;
 
+int succeed = 0;
+long long int microseconds = 0;
+
 struct ctx {
+	struct timespec ts;
 	struct event ev;
 	int state;
 };
@@ -34,6 +39,7 @@ static void
 http_callback (int fd, short what, void *arg)
 {
 	struct ctx *ctx = (struct ctx *)arg;
+	struct timespec ts;
 	int r, s_error;
 	socklen_t optlen;
 	char buf[1024];
@@ -86,6 +92,9 @@ http_callback (int fd, short what, void *arg)
 					}
 					event_del (&ctx->ev);
 					close (fd);
+					succeed ++;
+					clock_gettime (CLOCK_REALTIME, &ts);
+					microseconds += (ts.tv_sec - ctx->ts.tv_sec) * 1000000L + (ts.tv_nsec - ctx->ts.tv_nsec) / 1000;
 					free (ctx);
 					return;
 				}
@@ -132,6 +141,7 @@ connect_socket ()
 	curctx = malloc (sizeof (struct ctx));
 	
 	curctx->state = STATE_CONNECT;
+	clock_gettime (CLOCK_REALTIME, &curctx->ts);
 	event_set (&curctx->ev, s, EV_WRITE | EV_TIMEOUT, http_callback, curctx);
 	event_add (&curctx->ev, &http_timeout);
 }
@@ -150,10 +160,9 @@ main (int argc, char **argv)
 	http_timeout.tv_sec = 1;
 	http_timeout.tv_usec = 0;
 
-	while ((ch = getopt(argc, argv, "c:h:p:n:t:u:i:s?")) != -1) {
+	while ((ch = getopt(argc, argv, "c:p:n:t:u:i:sh")) != -1) {
         switch (ch) {
             case 'c':
-			case 'h':
 				if (optarg) {
 					host = strdup (optarg);
 					if (inet_aton (optarg, &addr.sin_addr) == 0) {
@@ -193,13 +202,13 @@ main (int argc, char **argv)
 					iterations = atoi (optarg);
 				}
 				break;
-            case '?':
+            case 'h':
             default:
                 /* Show help message and exit */
                 printf (
-                        "Usage: http-stress [-h host] [-p port] [-n connections_count] [-t timeout]\n"
-                        "-?:        This help message\n"
-                        "-h:        Connect to specified host or ip (default 127.0.0.1)\n"
+                        "Usage: http-stress [-c host] [-p port] [-n connections_count] [-t timeout]\n"
+                        "-h:        This help message\n"
+                        "-c:        Connect to specified host or ip (default 127.0.0.1)\n"
                         "-p:        Specify port to connect (default 80)\n"
 						"-i:        Number of iterations (default 1)"
                         "-t:        Number of seconds to timeout (default 1)\n"
@@ -220,4 +229,12 @@ main (int argc, char **argv)
 
 		event_loop (0);
 	}
+
+	printf ("Number of connections: %d\n"
+	        "Number of successfull connections: %d\n"
+			"Total amount of time (microseconds): %lld = %.3f msec\n"
+			"Average per connection: %lld = %.3f msec\n",
+			nconns, succeed, microseconds, microseconds / 1000.,
+			succeed ? microseconds / succeed : 0,
+			succeed ? (microseconds / 1. / succeed / 1000.) : 0.);
 }
