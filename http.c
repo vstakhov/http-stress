@@ -19,21 +19,34 @@
 #define STATE_CONNECT 0
 #define STATE_READ 1
 
+#define HN_DECIMAL              0x01
+#define HN_NOSPACE              0x02
+#define HN_B                    0x04
+#define HN_DIVISOR_1000         0x08
+
+#define HN_GETSCALE             0x10
+#define HN_AUTOSCALE            0x20
+
+
 struct sockaddr_in addr;
 struct timeval http_timeout;
 int nconns = FIXED_CONNS;
 char *host = "localhost";
 char *url = "";
 int silent = 0;
+int remain;
 
 int succeed = 0;
 long long int microseconds = 0;
+unsigned long long int bytes;
 
 struct ctx {
 	struct timespec ts;
 	struct event ev;
 	int state;
 };
+
+int humanize_number(char *buf, size_t len, int64_t bytes, const char *suffix, int scale, int flags);
 
 static void
 http_callback (int fd, short what, void *arg)
@@ -43,7 +56,15 @@ http_callback (int fd, short what, void *arg)
 	int r, s_error;
 	socklen_t optlen;
 	char buf[1024];
-
+	struct timeval ntv;
+	
+	if (what == EV_TIMEOUT) {
+		fprintf (stderr, "Connection timed out\n");
+		event_del (&ctx->ev);
+		close (fd);
+		free (ctx);
+		goto check_remain;	
+	}
 	switch (ctx->state) {
 		case STATE_CONNECT:
 			if (what == EV_WRITE) {
@@ -54,12 +75,12 @@ http_callback (int fd, short what, void *arg)
 					event_del (&ctx->ev);
 					close (fd);
 					free (ctx);
-					return;
+					goto check_remain;
 	    		}
 				if (!silent) {
 					fprintf (stderr, "Connection successful\n");
 				}
-				r = snprintf (buf, sizeof (buf), "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n", url, host);
+				r = snprintf (buf, sizeof (buf), "GET /%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", url, host);
 				if (write (fd, buf, r) == -1) {
 					if (!silent) {
 						fprintf (stderr, "Write error: %s, %d\n", strerror (errno), errno);
@@ -67,12 +88,12 @@ http_callback (int fd, short what, void *arg)
 					event_del (&ctx->ev);
 					close (fd);
 					free (ctx);
-					return;
+					goto check_remain;
 				}
 				ctx->state = STATE_READ;
 				event_del (&ctx->ev);
 				event_set (&ctx->ev, fd, EV_READ | EV_TIMEOUT | EV_PERSIST, http_callback, ctx);
-				event_add (&ctx->ev, NULL);
+				event_add (&ctx->ev, &http_timeout);
 			}
 			else {
 				if (!silent) {
@@ -81,26 +102,32 @@ http_callback (int fd, short what, void *arg)
 				event_del (&ctx->ev);
 				close (fd);
 				free (ctx);
-				return;
+				goto check_remain;
 			}
 			break;
 		case STATE_READ:
 			if (what == EV_READ) {
 				if ((r = read (fd, buf, sizeof (buf))) <= 0) {
+					if (r == -1) {
+						fprintf (stderr, "Error while reading: %s\n", strerror (errno));	
+					}
+					else {
+						succeed ++;
+					}
 					if (!silent) {
 						fprintf (stderr, "Read eof, closing connection\n");
 					}
 					event_del (&ctx->ev);
 					close (fd);
-					succeed ++;
 					clock_gettime (CLOCK_REALTIME, &ts);
 					microseconds += (ts.tv_sec - ctx->ts.tv_sec) * 1000000L + (ts.tv_nsec - ctx->ts.tv_nsec) / 1000;
 					free (ctx);
-					return;
+					goto check_remain;
 				}
 				if (!silent) {
 					fprintf (stderr, "Read %d bytes\n", r);
 				}
+				bytes += r;
 			}
 			else {
 				if (!silent) {
@@ -109,9 +136,19 @@ http_callback (int fd, short what, void *arg)
 				event_del (&ctx->ev);
 				close (fd);
 				free (ctx);
-				return;
+				goto check_remain;
 			}
 			break;
+	}
+
+	return;
+
+	check_remain:
+	remain --;
+	if (remain == 0) {
+		ntv.tv_sec = 0;
+		ntv.tv_usec = 0;
+		event_loopexit (&ntv);	
 	}
 }
 
@@ -151,6 +188,7 @@ main (int argc, char **argv)
 {
 	int ch, i, iterations = 1;
 	struct hostent *he;
+	char intbuf[32], intbuf2[32];
 	event_init ();
 	
 	bzero (&addr, sizeof (struct sockaddr_in));
@@ -210,7 +248,7 @@ main (int argc, char **argv)
                         "-h:        This help message\n"
                         "-c:        Connect to specified host or ip (default 127.0.0.1)\n"
                         "-p:        Specify port to connect (default 80)\n"
-						"-i:        Number of iterations (default 1)"
+						"-i:        Number of iterations (default 1)\n"
                         "-t:        Number of seconds to timeout (default 1)\n"
 						"-u:        Url to get (relative to /)\n"
 						"-s:        Silent mode\n"
@@ -222,19 +260,30 @@ main (int argc, char **argv)
 	
 	signal (SIGPIPE, SIG_IGN);
 
-	while (iterations --) {
+	while (iterations) {
 		for (i = 0; i < nconns; i ++) {
 			connect_socket ();
 		}
+		remain = nconns;
 
 		event_loop (0);
+		iterations --;
 	}
+
+	humanize_number (intbuf, sizeof (intbuf), bytes, "B", 1, HN_B);
+	humanize_number (intbuf2, sizeof (intbuf2), (double)bytes / ((double)microseconds / 1000000.) * 8, "b/sec", 1, HN_B);
 
 	printf ("Number of connections: %d\n"
 	        "Number of successfull connections: %d\n"
 			"Total amount of time (microseconds): %lld = %.3f msec\n"
-			"Average per connection: %lld = %.3f msec\n",
+			"Average per connection: %lld = %.3f msec\n"
+			"Average connections per second: %.3f\n"
+			"Bytes read: %s, %s\n",
 			nconns, succeed, microseconds, microseconds / 1000.,
 			succeed ? microseconds / succeed : 0,
-			succeed ? (microseconds / 1. / succeed / 1000.) : 0.);
+			succeed ? (microseconds / 1. / succeed / 1000.) : 0.,
+			(double)succeed / ((double)microseconds / 1000000.),
+			intbuf, intbuf2);
+	
+	exit (EXIT_SUCCESS);
 }
