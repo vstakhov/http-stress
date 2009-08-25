@@ -41,7 +41,7 @@ long long int microseconds = 0;
 unsigned long long int bytes;
 
 struct ctx {
-	struct timespec ts;
+	struct timeval tv;
 	struct event ev;
 	int state;
 };
@@ -52,7 +52,6 @@ static void
 http_callback (int fd, short what, void *arg)
 {
 	struct ctx *ctx = (struct ctx *)arg;
-	struct timespec ts;
 	int r, s_error;
 	socklen_t optlen;
 	char buf[1024];
@@ -93,7 +92,8 @@ http_callback (int fd, short what, void *arg)
 				ctx->state = STATE_READ;
 				event_del (&ctx->ev);
 				event_set (&ctx->ev, fd, EV_READ | EV_TIMEOUT | EV_PERSIST, http_callback, ctx);
-				event_add (&ctx->ev, &http_timeout);
+				memcpy (&ctx->tv, &http_timeout, sizeof (struct timeval));
+				event_add (&ctx->ev, &ctx->tv);
 			}
 			else {
 				if (!silent) {
@@ -119,8 +119,6 @@ http_callback (int fd, short what, void *arg)
 					}
 					event_del (&ctx->ev);
 					close (fd);
-					clock_gettime (CLOCK_REALTIME, &ts);
-					microseconds += (ts.tv_sec - ctx->ts.tv_sec) * 1000000L + (ts.tv_nsec - ctx->ts.tv_nsec) / 1000;
 					free (ctx);
 					goto check_remain;
 				}
@@ -178,9 +176,9 @@ connect_socket ()
 	curctx = malloc (sizeof (struct ctx));
 	
 	curctx->state = STATE_CONNECT;
-	clock_gettime (CLOCK_REALTIME, &curctx->ts);
 	event_set (&curctx->ev, s, EV_WRITE | EV_TIMEOUT, http_callback, curctx);
-	event_add (&curctx->ev, &http_timeout);
+	memcpy (&curctx->tv, &http_timeout, sizeof (struct timeval));
+	event_add (&curctx->ev, &curctx->tv);
 }
 
 int
@@ -189,6 +187,7 @@ main (int argc, char **argv)
 	int ch, i, iterations = 1;
 	struct hostent *he;
 	char intbuf[32], intbuf2[32];
+	struct timespec ts1, ts2;
 	event_init ();
 	
 	bzero (&addr, sizeof (struct sockaddr_in));
@@ -261,12 +260,15 @@ main (int argc, char **argv)
 	signal (SIGPIPE, SIG_IGN);
 
 	while (iterations) {
+		clock_gettime (CLOCK_REALTIME, &ts1);
 		for (i = 0; i < nconns; i ++) {
 			connect_socket ();
 		}
 		remain = nconns;
 
 		event_loop (0);
+		clock_gettime (CLOCK_REALTIME, &ts2);
+		microseconds += (ts2.tv_sec - ts1.tv_sec) * 1000000L + (ts2.tv_nsec - ts1.tv_nsec) / 1000;
 		iterations --;
 	}
 
