@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/queue.h>
 
 #include "event.h"
 
@@ -41,10 +42,24 @@ long long int microseconds = 0;
 unsigned long long int bytes;
 
 struct ctx {
+    struct timespec *begin;
 	struct timeval tv;
 	struct event ev;
 	int state;
+    char *url;
+    struct url_item *item;
 };
+
+struct url_item {
+    char *url;
+    uint64_t average;
+    int count;
+    int succeed;
+    int total;
+    TAILQ_ENTRY (url_item) entry;
+};
+
+TAILQ_HEAD(urlhead, url_item) *urls;
 
 int humanize_number(char *buf, size_t len, int64_t bytes, const char *suffix, int scale, int flags);
 
@@ -56,8 +71,14 @@ http_callback (int fd, short what, void *arg)
 	socklen_t optlen;
 	char buf[1024];
 	struct timeval ntv;
+    struct timespec ts;
+    uint64_t ms;
+    double alpha;
 	
 	if (what == EV_TIMEOUT) {
+        if (ctx->item) {
+            ctx->item->count ++;
+        }
 		fprintf (stderr, "Connection timed out\n");
 		event_del (&ctx->ev);
 		close (fd);
@@ -71,6 +92,9 @@ http_callback (int fd, short what, void *arg)
 				getsockopt (fd, SOL_SOCKET, SO_ERROR, (void *)&s_error, &optlen);
 	    		if (s_error && !silent) {
 					fprintf (stderr, "Connection failed: %s, %d\n", strerror (s_error), s_error);
+                    if (ctx->item) {
+                        ctx->item->count ++;
+                    }
 					event_del (&ctx->ev);
 					close (fd);
 					free (ctx);
@@ -79,12 +103,15 @@ http_callback (int fd, short what, void *arg)
 				if (!silent) {
 					fprintf (stderr, "Connection successful\n");
 				}
-				r = snprintf (buf, sizeof (buf), "GET /%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", url, host);
+				r = snprintf (buf, sizeof (buf), "GET /%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", ctx->url, host);
 				if (write (fd, buf, r) == -1) {
 					if (!silent) {
 						fprintf (stderr, "Write error: %s, %d\n", strerror (errno), errno);
 					}
 					event_del (&ctx->ev);
+                    if (ctx->item) {
+                        ctx->item->count ++;
+                    }
 					close (fd);
 					free (ctx);
 					goto check_remain;
@@ -100,6 +127,9 @@ http_callback (int fd, short what, void *arg)
 					fprintf (stderr, "Connection error: %d\n", what);
 				}
 				event_del (&ctx->ev);
+                if (ctx->item) {
+                    ctx->item->count ++;
+                }
 				close (fd);
 				free (ctx);
 				goto check_remain;
@@ -113,6 +143,15 @@ http_callback (int fd, short what, void *arg)
 					}
 					else {
 						succeed ++;
+                        if (ctx->item) {
+                            /* Calculate time for this request */
+                            clock_gettime (CLOCK_REALTIME, &ts);
+                    		ms = (ts.tv_sec - ctx->begin->tv_sec) * 1000000L + (ts.tv_nsec - ctx->begin->tv_nsec) / 1000;
+                            /* Calculate growing average */
+                            alpha = 2. / (++ctx->item->count + 1);
+                            ctx->item->average = (double)ctx->item->average * (1. - alpha) + (double)ms * alpha;
+                            ctx->item->succeed ++;
+                        }
 					}
 					if (!silent) {
 						fprintf (stderr, "Read eof, closing connection\n");
@@ -131,6 +170,9 @@ http_callback (int fd, short what, void *arg)
 				if (!silent) {
 					fprintf (stderr, "Read error, connection closed\n");
 				}
+                if (ctx->item) {
+                    ctx->item->count ++;
+                }
 				event_del (&ctx->ev);
 				close (fd);
 				free (ctx);
@@ -151,7 +193,7 @@ http_callback (int fd, short what, void *arg)
 }
 
 static void
-connect_socket ()
+connect_socket (char *url, struct url_item *item, struct timespec *begin)
 {
 	int s, r, flags;
 	struct ctx *curctx;
@@ -176,18 +218,92 @@ connect_socket ()
 	curctx = malloc (sizeof (struct ctx));
 	
 	curctx->state = STATE_CONNECT;
+    curctx->url = url;
+    curctx->begin = begin;
+    curctx->item = item;
 	event_set (&curctx->ev, s, EV_WRITE | EV_TIMEOUT, http_callback, curctx);
 	memcpy (&curctx->tv, &http_timeout, sizeof (struct timeval));
 	event_add (&curctx->ev, &curctx->tv);
 }
 
+char*
+strchug (char *string)
+{
+    char *start;
+
+
+    for (start = (char*) string; *start && isspace (*start); start++)
+    ;
+
+    memmove (string, start, strlen (start) + 1);
+
+    return string;
+}
+
+char*
+strchomp (char *string)
+{
+    int len;
+
+    len = strlen (string);
+    while (len--) {
+        if (isspace (string[len])) {
+            string[len] = '\0';
+        }
+        else {
+            break;
+        }
+    }
+
+    return string;
+}
+
+static int
+read_urls_file (const char *file)
+{
+    FILE *f;
+    char buf[BUFSIZ];
+    struct url_item *new_item;
+
+    f = fopen (file, "r");
+
+    if (f == NULL) {
+        return 0;
+    }
+
+    while (!feof (f)) {
+        if (!fgets (buf, sizeof(buf), f)) {
+            break;
+        }
+        strchomp (strchug (buf));
+        if (buf[0] == '#') {
+            /* skip comments */
+            continue;
+        }
+        new_item = malloc (sizeof (struct url_item));
+        if (!new_item) {
+            fclose (f);
+            return 0;
+        }
+        bzero (new_item, sizeof (struct url_item));
+        new_item->url = strdup (buf);
+        TAILQ_INSERT_TAIL (urls, new_item, entry); 
+    }
+    
+    fclose (f);
+
+    return 1;
+}
+
 int
 main (int argc, char **argv)
 {
-	int ch, i, iterations = 1;
+	int ch, i, j, iterations = 1;
 	struct hostent *he;
 	char intbuf[32], intbuf2[32];
 	struct timespec ts1, ts2;
+    struct url_item *np;
+
 	event_init ();
 	
 	bzero (&addr, sizeof (struct sockaddr_in));
@@ -197,7 +313,7 @@ main (int argc, char **argv)
 	http_timeout.tv_sec = 1;
 	http_timeout.tv_usec = 0;
 
-	while ((ch = getopt(argc, argv, "c:p:n:t:u:i:sh")) != -1) {
+	while ((ch = getopt(argc, argv, "f:c:p:n:t:u:i:sh")) != -1) {
         switch (ch) {
             case 'c':
 				if (optarg) {
@@ -239,12 +355,22 @@ main (int argc, char **argv)
 					iterations = atoi (optarg);
 				}
 				break;
+            case 'f':
+                if (optarg) {
+                    urls = malloc (sizeof (struct urlhead));
+                    TAILQ_INIT(urls);
+                    if (!read_urls_file (optarg)) {
+                        urls = NULL;
+                    }
+                }
+                break;
             case 'h':
             default:
                 /* Show help message and exit */
                 printf (
-                        "Usage: http-stress [-c host] [-p port] [-n connections_count] [-t timeout]\n"
+                        "Usage: http-stress [-c host] [-p port] [-n connections_count] [-t timeout] [-f file]\n"
                         "-h:        This help message\n"
+                        "-f:        Specify file with urls\n"
                         "-c:        Connect to specified host or ip (default 127.0.0.1)\n"
                         "-p:        Specify port to connect (default 80)\n"
 						"-i:        Number of iterations (default 1)\n"
@@ -259,20 +385,39 @@ main (int argc, char **argv)
 	
 	signal (SIGPIPE, SIG_IGN);
 
-	while (iterations) {
+	for (j = 0; j < iterations; j ++) {
 		clock_gettime (CLOCK_REALTIME, &ts1);
-		for (i = 0; i < nconns; i ++) {
-			connect_socket ();
-		}
+        if (urls == NULL) {
+		    for (i = 0; i < nconns; i ++) {
+			    connect_socket (url, NULL, &ts1);
+		    }
+        }
+        else {
+            /* Get all urls */
+            nconns = 0;
+            for (np = urls->tqh_first; np != NULL; np = np->entry.tqe_next) {
+                connect_socket (np->url, np, &ts1);
+                nconns ++;
+            }
+        }
 		remain = nconns;
 
 		event_loop (0);
 		clock_gettime (CLOCK_REALTIME, &ts2);
 		microseconds += (ts2.tv_sec - ts1.tv_sec) * 1000000L + (ts2.tv_nsec - ts1.tv_nsec) / 1000;
-		iterations --;
 	}
 
-	humanize_number (intbuf, sizeof (intbuf), bytes, "B", 1, HN_B);
+    if (urls != NULL) {
+        printf ("*** URLS STATISTICS ***\n");
+        printf ("--------------------------------------------------------------------------\n"
+                "| URL                                      | TIME       | SUCCESS | FAIL |\n"
+                "--------------------------------------------------------------------------\n");
+        for (np = urls->tqh_first; np != NULL; np = np->entry.tqe_next) {
+            printf ("| %40.39s | %10lu | %7d | %4d |\n", np->url, (long int)np->average / 1000, np->succeed, (np->count - np->succeed));
+        }
+        printf ("--------------------------------------------------------------------------\n");
+    }
+    humanize_number (intbuf, sizeof (intbuf), bytes, "B", 1, HN_B);
 	humanize_number (intbuf2, sizeof (intbuf2), (double)bytes / ((double)microseconds / 1000000.) * 8, "b/sec", 1, HN_B);
 
 	printf ("Number of connections: %d\n"
@@ -281,7 +426,7 @@ main (int argc, char **argv)
 			"Average per connection: %lld = %.3f msec\n"
 			"Average connections per second: %.3f\n"
 			"Bytes read: %s, %s\n",
-			nconns, succeed, microseconds, microseconds / 1000.,
+			nconns * iterations, succeed, microseconds, microseconds / 1000.,
 			succeed ? microseconds / succeed : 0,
 			succeed ? (microseconds / 1. / succeed / 1000.) : 0.,
 			(double)succeed / ((double)microseconds / 1000000.),
