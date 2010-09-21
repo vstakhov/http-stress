@@ -301,7 +301,7 @@ read_urls_file (const char *file)
 int
 main (int argc, char **argv)
 {
-	int ch, i, j, iterations = 1;
+	int ch, i, j, iterations = 1, tconns = 0;
 	struct hostent *he;
 	char intbuf[32], intbuf2[32];
 	struct timespec ts1, ts2;
@@ -412,6 +412,7 @@ begin:
 		    for (i = 0; i < nconns; i ++) {
 			    connect_socket (url, NULL, &ts1);
 		    }
+			tconns = nconns;
         }
         else {
             /* Get all urls */
@@ -422,6 +423,7 @@ begin:
 			for (; np != NULL; np = np->entry.tqe_next) {
 				connect_socket (np->url, np, &ts1);
 				nconns ++;
+				tconns ++;
 				if (nconns > rlim.rlim_max - 10) { 
 					break;
 				}
@@ -457,7 +459,7 @@ begin:
 			"Average per connection: %lld = %.3f msec\n"
 			"Average connections per second: %.3f\n"
 			"Bytes read: %s, %s\n",
-			nconns * iterations, succeed, microseconds, microseconds / 1000.,
+			tconns * iterations, succeed, microseconds, microseconds / 1000.,
 			succeed ? microseconds / succeed : 0,
 			succeed ? (microseconds / 1. / succeed / 1000.) : 0.,
 			(double)succeed / ((double)microseconds / 1000000.),
