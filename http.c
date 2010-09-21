@@ -305,7 +305,7 @@ main (int argc, char **argv)
 	struct hostent *he;
 	char intbuf[32], intbuf2[32];
 	struct timespec ts1, ts2;
-    struct url_item *np;
+    struct url_item *np = NULL;
 	struct rlimit rlim;
 
 	event_init ();
@@ -388,16 +388,26 @@ main (int argc, char **argv)
     }
 	
 	signal (SIGPIPE, SIG_IGN);
-	/* Try to set rlimits for openfiles */
 	getrlimit (RLIMIT_NOFILE, &rlim);
-	fprintf (stderr, "current files limit: %ld, targeted: %ld, hard limit: %ld\n", (long int)rlim.rlim_cur, (long int)nconns + 10, (long int)rlim.rlim_max);	
-	rlim.rlim_cur = nconns + 10;
-	if (setrlimit (RLIMIT_NOFILE, &rlim) == -1) {
-		fprintf (stderr, "setting limits failed: %s, %d, targeted limit: %ld\n", strerror (errno), errno, (long int)rlim.rlim_cur);		
+	if (urls == NULL) {
+		/* Try to set rlimits for openfiles */
+		fprintf (stderr, "current files limit: %ld, targeted: %ld, hard limit: %ld\n", (long int)rlim.rlim_cur, (long int)nconns + 10, (long int)rlim.rlim_max);	
+		rlim.rlim_cur = nconns + 10;
+		if (setrlimit (RLIMIT_NOFILE, &rlim) == -1) {
+			fprintf (stderr, "setting limits failed: %s, %d, targeted limit: %ld\n", strerror (errno), errno, (long int)rlim.rlim_cur);		
+		}
+	}
+	else {
+		/* Set as big as possible */
+		rlim.rlim_cur = rlim.rlim_max;
+		if (setrlimit (RLIMIT_NOFILE, &rlim) == -1) {
+			fprintf (stderr, "setting limits failed: %s, %d, targeted limit: %ld\n", strerror (errno), errno, (long int)rlim.rlim_cur);		
+		}
 	}
 
 	for (j = 0; j < iterations; j ++) {
 		clock_gettime (CLOCK_REALTIME, &ts1);
+begin:
         if (urls == NULL) {
 		    for (i = 0; i < nconns; i ++) {
 			    connect_socket (url, NULL, &ts1);
@@ -406,14 +416,24 @@ main (int argc, char **argv)
         else {
             /* Get all urls */
             nconns = 0;
-            for (np = urls->tqh_first; np != NULL; np = np->entry.tqe_next) {
-                connect_socket (np->url, np, &ts1);
-                nconns ++;
-            }
+			if (np == NULL) {
+				np = urls->tqh_first;
+			}
+			for (; np != NULL; np = np->entry.tqe_next) {
+				connect_socket (np->url, np, &ts1);
+				nconns ++;
+				if (nconns > rlim.rlim_max - 10) { 
+					break;
+				}
+			}
         }
 		remain = nconns;
 
 		event_loop (0);
+		if (np != NULL) {
+			/* Continue processing urls file to avoid limits problem */
+			goto begin;			
+		}
 		clock_gettime (CLOCK_REALTIME, &ts2);
 		microseconds += (ts2.tv_sec - ts1.tv_sec) * 1000000L + (ts2.tv_nsec - ts1.tv_nsec) / 1000;
 	}
