@@ -1,18 +1,21 @@
 #include <sys/types.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <sys/queue.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/poll.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <sys/poll.h>
 #include <netdb.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <time.h>
-#include <sys/queue.h>
+#include <ctype.h>
 
 #include "event.h"
 
@@ -201,7 +204,7 @@ connect_socket (char *url, struct url_item *item, struct timespec *begin)
 	s = socket (AF_INET, SOCK_STREAM, 0);
 
 	if (s == -1) {
-		fprintf (stderr, "socket() failed: %m, %d\n", errno);
+		fprintf (stderr, "socket() failed: %s, %d\n", strerror (errno), errno);
 		return;
 	}
 	
@@ -211,7 +214,7 @@ connect_socket (char *url, struct url_item *item, struct timespec *begin)
 	r = connect(s, (struct sockaddr *)&addr, sizeof (addr));
 	if (r == -1 && errno != EINPROGRESS) {
 		if (!silent) {
-			fprintf (stderr, "connect() failed: %m, %d\n", errno);
+			fprintf (stderr, "connect() failed: %s, %d\n", strerror (errno), errno);
 		}
 		return;
 	}
@@ -303,6 +306,7 @@ main (int argc, char **argv)
 	char intbuf[32], intbuf2[32];
 	struct timespec ts1, ts2;
     struct url_item *np;
+	struct rlimit rlim;
 
 	event_init ();
 	
@@ -384,6 +388,13 @@ main (int argc, char **argv)
     }
 	
 	signal (SIGPIPE, SIG_IGN);
+	/* Try to set rlimits for openfiles */
+	getrlimit (RLIMIT_NOFILE, &rlim);
+	fprintf (stderr, "current files limit: %ld, targeted: %ld, hard limit: %ld\n", (long int)rlim.rlim_cur, (long int)nconns + 10, (long int)rlim.rlim_max);	
+	rlim.rlim_cur = nconns + 10;
+	if (setrlimit (RLIMIT_NOFILE, &rlim) == -1) {
+		fprintf (stderr, "setting limits failed: %s, %d, targeted limit: %ld\n", strerror (errno), errno, (long int)rlim.rlim_cur);		
+	}
 
 	for (j = 0; j < iterations; j ++) {
 		clock_gettime (CLOCK_REALTIME, &ts1);
