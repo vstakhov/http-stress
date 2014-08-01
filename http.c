@@ -322,7 +322,7 @@ read_urls_file (const char *file)
 int
 main (int argc, char **argv)
 {
-	int ch, i, j, iterations = 1, tconns = 0;
+	int ch, i, j, iterations = 1, tconns = 0, urlconns = 0;
 	struct hostent *he;
 	char intbuf[32], intbuf2[32];
 	struct timespec ts1, ts2;
@@ -412,63 +412,50 @@ main (int argc, char **argv)
 
 	signal (SIGPIPE, SIG_IGN);
 	getrlimit (RLIMIT_NOFILE, &rlim);
-	if (urls == NULL) {
-		/* Try to set rlimits for openfiles */
+	/* Try to set rlimits for openfiles */
+	fprintf (stderr,
+		"current files limit: %ld, targeted: %ld, hard limit: %ld\n",
+		(long int)rlim.rlim_cur,
+		(long int)nconns + 10,
+		(long int)rlim.rlim_max);
+	rlim.rlim_cur = nconns + 10;
+	if (setrlimit (RLIMIT_NOFILE, &rlim) == -1) {
 		fprintf (stderr,
-			"current files limit: %ld, targeted: %ld, hard limit: %ld\n",
-			(long int)rlim.rlim_cur,
-			(long int)nconns + 10,
-			(long int)rlim.rlim_max);
-		rlim.rlim_cur = nconns + 10;
-		if (setrlimit (RLIMIT_NOFILE, &rlim) == -1) {
-			fprintf (stderr,
-				"setting limits failed: %s, %d, targeted limit: %ld\n",
-				strerror (errno),
-				errno,
-				(long int)rlim.rlim_cur);
-		}
-	}
-	else {
-		/* Set as big as possible */
-		rlim.rlim_cur = rlim.rlim_max;
-		if (setrlimit (RLIMIT_NOFILE, &rlim) == -1) {
-			fprintf (stderr,
-				"setting limits failed: %s, %d, targeted limit: %ld\n",
-				strerror (errno),
-				errno,
-				(long int)rlim.rlim_cur);
-		}
+			"setting limits failed: %s, %d, targeted limit: %ld\n",
+			strerror (errno),
+			errno,
+			(long int)rlim.rlim_cur);
 	}
 
 	for (j = 0; j < iterations; j++) {
-		clock_gettime (CLOCK_REALTIME, &ts1);
 begin:
+		clock_gettime (CLOCK_REALTIME, &ts1);
 		if (urls == NULL) {
 			for (i = 0; i < nconns; i++) {
 				connect_socket (url, NULL, &ts1);
 			}
-			tconns = nconns;
+			tconns += nconns;
+			remain = nconns;
 		}
 		else {
 			/* Get all urls */
-			nconns = 0;
+			urlconns = 0;
 			if (np == NULL) {
 				np = urls->tqh_first;
 			}
 			for (; np != NULL; np = np->entry.tqe_next) {
 				connect_socket (np->url, np, &ts1);
-				nconns++;
+				urlconns++;
 				tconns++;
-				if (nconns > rlim.rlim_max - 10) {
+				if (urlconns >= nconns) {
 					break;
 				}
 			}
+			remain = urlconns;
 		}
-		remain = nconns;
 
 		event_loop (0);
 		if (np != NULL) {
-			/* Continue processing urls file to avoid limits problem */
 			goto begin;
 		}
 		clock_gettime (CLOCK_REALTIME, &ts2);
