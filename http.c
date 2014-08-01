@@ -455,13 +455,13 @@ begin:
 		}
 
 		event_loop (0);
-		if (np != NULL) {
-			goto begin;
-		}
 		clock_gettime (CLOCK_REALTIME, &ts2);
 		microseconds +=
 			(ts2.tv_sec -
 			ts1.tv_sec) * 1000000L + (ts2.tv_nsec - ts1.tv_nsec) / 1000;
+		if (np != NULL) {
+			goto begin;
+		}
 	}
 
 	if (urls != NULL) {
